@@ -27,7 +27,7 @@ n = ceil(150/((Fs.^(-1))*1000));
 % esto es porque se da 360 ms para detectar un latido 
 
 nInit =  2*ceil( (400/((Fs.^(-1))*1000)) );
-RRIntervaLen = nInit/2; 
+RRavg2 = nInit/2; 
 
 % lista de 8 intervalos RR más reciencientes 
 RR1 = [];
@@ -37,20 +37,20 @@ RR2 = [];
 
 % conjunto de umbrales para la señal filtrada y la integrada
 % respectivamente
-thresholdSet1 = [];
-thresholdSet2 = [];
+thresholdSetF = [];
+thresholdSetI = [];
 
 % media del pico de la señal filtrada
-meanPeakFromFiltSignal = 0;
+SPKF = 0;
 
 % media del pico de ruido de la señal  filtrada 
-meanNoisePeakFromFiltSignal = 0;
+NPKF = 0;
 
 % media del pico de la señal integrada
-meanPeakFromIntSignal = 0;
+SPKI = 0;
 
 % media del pico del ruido de la señal integrada
-meanNoisePeakFromIntSignal = 0;
+NPKI = 0;
 
 
 % variable de lectura de la señal para simulaciones
@@ -88,11 +88,25 @@ integral = [zeros(n,1); movingIntegrator(squared, n)'];
 prevQRSindex = 0;
 
 % indice de intervalo RR bajo, alto y miss 
-RRlow = RRIntervaLen * 0.92;
-RRhigh = RRIntervaLen * 1.16;
-RRmiss = RRIntervaLen * 1.66;
+RRlow = RRavg2 * 0.92;
+RRhigh = RRavg2 * 1.16;
+RRmiss = RRavg2 * 1.66;
 
 beginning = (n+1) + 2;
+
+%tiempo que debe esperar para inicializar la detección de umbrales
+twoSeconds = ceil(2000/((Fs.^(-1))*1000));
+
+% tiempo en el que tras ocurrir un latido no puede ocurrir otro 
+% (lo dice el paper, son 200 ms). 
+refatoryPeriod = ceil(200/((Fs.^(-1))*1000));
+
+% variable para indicar que está en periodo de espera para poder detectar 
+% otro QRS
+isInRefatoryPeriod = false;
+
+
+
 
 for i = beginning:L-2
    
@@ -101,11 +115,10 @@ for i = beginning:L-2
     end
     
     sample = signal(i);
-    % filtrado de la señal para solo pasar de 5 Hz a 15 Hz 
-    filteredLocalSignal = filter(b1, a1, localSignal(i-n:i));
-    filteredLocalSignal = filter(b2, a2, filteredLocalSignal);
-    
     localSignal(i) = sample;
+    
+    % filtrado de la señal para solo pasar de 5 Hz a 15 Hz 
+    filteredLocalSignal = passbandFilter(localSignal(i-34:i));
     localFilteredSignal(i) = filteredLocalSignal(end);
     
     derivative(i-2) = (1/(8.*T)) .* ( (2*localFilteredSignal(i+1) + ...
@@ -134,6 +147,7 @@ for i = beginning:L-2
     xlabel('Tiempo (s)');
     ylabel('Unidades arbitrarias (u.a.)');
 
+    
     if i ~= L-2
         pause(0.0000000000000001);
         cla(plt1);
@@ -142,25 +156,104 @@ for i = beginning:L-2
     end
     
 
-    % si se ha salido del la región RRmiss 
-    if (i - prevQRSindex) > RRmiss
-    
-        [qrsFilteredSignal, idx1, thresholdSet1, ... 
-            meanPeakFromFiltSignal, meanNoisePeakFromFiltSignal] = ... 
-            detectQRScomplexSignal(localFilteredSignal(prevQRSindex:i) ...
-                                , thresholdSet1 ...
-                                , meanPeakFromFiltSignal...
-                                , meanNoisePeakFromFiltSignal);
+    % Al pasar dos segundos hacemos la inicialización
+    if i == twoSeconds
+ 
+        % inicializamos el SPKF
+        peaksFiltered = findpeaks( localFilteredSignal(1:i) );
+        [SPKF, idx] = max(peaksFiltered);
+        SPKF = SPKF/3;
+        
+        % inicializamos el NPKF
+        NPKF = mean(peaksFiltered( 1:length(peaksFiltered) ~= idx ))/2;
+        
+        % inicializamos el SPKI
+        peaksFiltered = findpeaks(  integral(1:i) );
+        [SPKI, idx] = max(peaksFiltered);
+        SPKI = SPKI/3;
+        
+        % inicializamos el NPKI
+        NPKI = mean(peaksFiltered( 1:length(peaksFiltered) ~= idx ))/2;
+        
+        
+        % Inicializamos el conjunto de umbrales para la señal filtrada 
+        thresholdSetF(1) = NPKF + 0.25*(SPKF - NPKF);
+        thresholdSetF(2) = thresholdSetF(1) * 0.5;
+        
+        % Inicializamos el conjunto de umbrales para la señal integrada
+        thresholdSetI(1) = NPKI + 0.25*(SPKI - NPKI);
+        thresholdSetI(2) = thresholdSetI(1) * 0.5;
+        
+        prevQRSindex = idx;
+        sound(beep, beepFs);
+        
+    elseif i > twoSeconds
+        
+        isQRSFilt = false;
+        isQRSInt = false;
+        
+        %   Detecta con los umbrales si hay o no un potencial QRS 
+        %   en la señal que ha sido filtrada
+        
+        if localFilteredSignal(i-2) > thresholdSetF(1)
+        
+            isQRSFilt = true;
+            SPKF = (0.125 * localFilteredSignal(i-2)) + 0.875 * SPKF;
+            prevQRSindex = i-2;
+            
+        % caso en que tiene que usar el 2do umbral para verificar 
+        % si la señal pico es un QRS
+        elseif (RRmiss == (i - 2 - prevQRSindex) )
+            
+            if localFilteredSignal(i - 2) > thresholdSetF(2)
+                isQRSFilt = true;
+                prevQRSindex = i-2;
+                
+                SPKF = (0.25 * localFilteredSignal(i-2)) + 0.75 * SPKF;
+                
+            end
+            
+        end
+        
 
-        [qrsIntegralSignal, idx2, thresholdSet2, ... 
-            meanPeakFromIntSignal, meanNoisePeakFromIntSignal]= ... 
-            detectQRScomplexSignal(integral(prevQRSindex:i) ...
-            , thresholdSet2 ...
-            , meanPeakFromIntSignal...
-            , meanNoisePeakFromIntSignal);
+        %   Detecta con los umbrales si hay o no un potencial QRS 
+        %   en la señal que ha sido integrada
+        
+        if integral(i-2) > thresholdSetI(1)
+        
+            isQRSInt = true;
+            SPKI = (0.125 * integral(i-2)) + 0.875 * SPKI;
+            prevQRSindex = i-2;
+            
+            
+        % caso en que tiene que usar el 2do umbral para verificar 
+        % si la señal pico es un QRS
+        elseif (RRmiss == (i - 2 - prevQRSindex) )
+            
+            if integral(i - 2) > thresholdSetI(2)
+                isQRSInt = true;
+                prevQRSindex = i-2;
+                
+                SPKI = (0.25 * integral(i-2)) + 0.75 * SPKI;
+            end
+            
+        end
         
         
-        if ()
+        % setea la variable que impide que suene multiples veces 
+        % la alarma en caso de detectar un QRS
+        
+        if ( (i - prevQRSindex) > refatoryPeriod)
+            isInRefatoryPeriod = false;
+        end
+        
+        % suena la alarma si ambos detectores dicen que hay un pico
+             
+        if (isQRSFilt && isQRSInt) && ( ~isInRefatoryPeriod )
+            
+           sound(beep, beepFs); 
+           isInRefatoryPeriod = true;
+        end
         
     end
     
