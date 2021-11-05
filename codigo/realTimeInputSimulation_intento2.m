@@ -60,24 +60,15 @@ localFilteredSignal = zeros(L,1);
 derivative = zeros(L,1);
 
 
-%% limpiar la señal    
-
-% frecuencias de corte 
-fc1 = 15; 
-fc2 = 5;
-
-% parametros para filtro pasa bajas con frecuencia de corte 15 Hz
-[b1,a1] = butter(4, fc1/(Fs/2));
-
-% parametros para filtro pasa altas con frecuencia de corte 5 Hz
-[b2,a2] = butter(4, fc2/(Fs/2), 'high');
-
 
 %% recibe todas las señales hasta tener cantidad suficiente
 
 localSignal(1:n) = signal(1:n);
-%localFilteredSignal(1:n) = filter(b1, a1, localSignal(1:n));
-%localFilteredSignal(1:n) = filter(b2, a2, localFilteredSignal(1:n));
+
+% para hacer el filtrado con el filtro original del paper es mejor hacerlo
+% a pedazos porque si se trata hacer todo de una sola vez el algoritmo
+% recursivo de filtrado tarda un siglo 
+
 localFilteredSignal(1: floor(n/2) ) = passbandFilter(localSignal( 1:floor(n/2) ));
 localFilteredSignal( floor(n/2)+1: n) = passbandFilter(localSignal( floor(n/2)+1 :n ));
 
@@ -110,6 +101,13 @@ refatoryPeriod = ceil(200/((Fs.^(-1))*1000));
 % otro QRS
 
 isInRefatoryPeriod = false;
+
+
+% variable para guardar el pico máximo que se va encontrando a lo largo del
+% proceso de busqueda de picos candidatos a ser complejo QRS
+
+maxPeakF = -Inf;
+maxPeakI = -Inf;
 
 
 %% empieza a analizar la señal en tiempo real
@@ -203,12 +201,14 @@ for i = beginning:L-2
     % hacemos el proceso de detección de QRS y actualización de variables
     
     elseif i > twoSeconds
-        
+               
         isQRSFilt = false;
         isQRSInt = false;
         
-        %   Detecta con los umbrales si hay o no un potencial QRS 
-        %   en la señal que ha sido filtrada
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        %   Detecta con los umbrales si hay o no un potencial QRS %
+        %   en la señal que ha sido ** FILTRADA **                %  
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         
         if localFilteredSignal(i-2) > thresholdSetF(1)
         
@@ -228,10 +228,11 @@ for i = beginning:L-2
         % si la señal pico es un QRS
         elseif (RRmiss == (i - 2 - prevQRSindex) )
             
-            % debería entonces regresarme en el pasado a revisar 
-            % si hay una señal que cumpla, eso es paila, toca mejorar el
-            % código
-            if localFilteredSignal(i - 2) > thresholdSetF(2)
+            % si el pico máximo encontrado a lo largo de este tiempo 
+            % es más grande que el segundo umbral entonces ese pico 
+            % se categoriza como un complejo QRS 
+            
+            if maxPeakF > thresholdSetF(2)
                 
                 isQRSFilt = true;
                 %añade el nuevo intervalo RR a la lista 
@@ -243,15 +244,37 @@ for i = beginning:L-2
                 end
 
                 prevQRSindex = i-2; 
-                SPKF = (0.25 * localFilteredSignal(i-2)) + 0.75 * SPKF;
+                SPKF = (0.25 * maxPeakF) + 0.75 * SPKF;
+            
+            % el caso en el que el pico más grande encontrado a lo largo de este
+            % periodo de búsqueda, no sea más grande que el segundo umbral
+            % se acutualiza el umbral de ruido
+            
+            else
                 
+                % actualizo el valor para el estimado de pico de ruido
+                NPKF = (maxPeakF * 0.125) + (NPKF * 0.875); 
             end
             
+            % resetea el pico máximo de la señal filtrada
+            maxPeakF = -Inf;
+            
+        % en caso de que aún no se esté en RRmiss y el dato detectado en el
+        % momento no sea mayor al umbral uno se revisa si se puede guardar
+        % como máximo pico 'temporal'
+        else
+            
+            if localFilteredSignal(i-2) > maxPeakF
+                maxPeakF = localFilteredSignal(i-2);
+            end
+                
         end
         
 
-        %   Detecta con los umbrales si hay o no un potencial QRS 
-        %   en la señal que ha sido integrada
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        %   Detecta con los umbrales si hay o no un potencial QRS %
+        %   en la señal que ha sido ** INTEGRADA **               %  
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         
         if integral(i-2) > thresholdSetI(1)
         
@@ -265,15 +288,35 @@ for i = beginning:L-2
         % si la señal pico es un QRS
         elseif (RRmiss == (i - 2 - prevQRSindex) )
             
-            if integral(i - 2) > thresholdSetI(2)
+            if maxPeakI > thresholdSetI(2)
                 isQRSInt = true;
                 prevQRSindex = i-2;
                 
-                SPKI = (0.25 * integral(i-2)) + 0.75 * SPKI;
+                SPKI = (0.25 * maxPeakI) + 0.75 * SPKI;
+            
+            else
+                
+                % actualizo el valor para el estimado de pico de ruido
+                NPKI = (maxPeakI * 0.125) + (NPKI * 0.875); 
             end
             
+            % resetea el pico máximo de la señal integrada
+            maxPeakI = -Inf;
+           
+        % en caso de que aún no se esté en RRmiss y el dato detectado en el
+        % momento no sea mayor al umbral uno se revisa si se puede guardar
+        % como máximo pico 'temporal'
+        
+        else
+            
+            if integral(i-2) > maxPeakI
+                maxPeakI = integral(i-2);
+            end
         end
         
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+        %   DETECCIÓN DE SEÑAL, RESETEO Y ACTUALIZACIÓN DE VARS     %
+        %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
         
         % setea la variable que impide que suene multiples veces 
         % la alarma en caso de detectar un QRS
@@ -288,6 +331,7 @@ for i = beginning:L-2
             
            sound(beep, beepFs); 
            isInRefatoryPeriod = true;
+
         end
         
         % saca la media de los 8 RR1 más recientes
