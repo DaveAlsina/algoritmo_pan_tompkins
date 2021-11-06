@@ -1,7 +1,7 @@
 %% cargado de la señal ecg
-signalStruct = load('ecg.mat');
+signalStruct = load('ecg2.mat');
 signal = signalStruct.ecg;
-
+Fs = signalStruct.Fs;
 
 [beep, beepFs] = audioread('beep1.wav');
 %sound(beep, beepFs);
@@ -9,7 +9,7 @@ signal = signalStruct.ecg;
 
 %% Variables útiles
 
-Fs = 500;
+
 L = length(signal);     % Longitud de la señal (numero de muestras)
 T = L/Fs;               % Duración de la señal
 t = linspace(0,T,L);
@@ -22,19 +22,13 @@ t = linspace(0,T,L);
 
 n = ceil(150/((Fs.^(-1))*1000));
 
-% mitad del número de muestras que deben haber para iniciar bien el
-% algoritmo esto porque se requiere que hayan 2 latidos detectados para
-% calibrar bien todos los umbrales y los estimados del intervalo RR
-% esto es porque se da 360 ms para detectar un latido 
-
-RRavg2 = ceil( (400/((Fs.^(-1))*1000)) );
+% promedios de los 8 más grandes intervalos RR, y de los más recientes
+% 8 intervalos RR, respectivamente
+RRavg2 = 0;
 RRavg1 = 0;
 
-% lista de 8 intervalos RR más reciencientes 
-RR1 = zeros(8,1);
-
-% lista de 8 intervalos RR más recientes dentro de RR-high y RR-low
-RR2 = [ RRavg2 ];
+% lista de intervalos RR 
+RR1 = [ ];
 
 % conjunto de umbrales para la señal filtrada y la integrada
 % respectivamente
@@ -80,12 +74,6 @@ integral = [zeros(n,1); movingIntegrator(squared, n)'];
 
 % indices usados para calcular los intervalos RR
 prevQRSindex = 0;
-
-% indice de intervalo RR bajo, alto y miss 
-RRlow = RRavg2 * 0.92;
-RRhigh = RRavg2 * 1.16;
-RRmiss = RRavg2 * 1.66;
-
 beginning = (n+1) + 2;
 
 % tiempo que debe esperar para inicializar la detección de umbrales
@@ -108,6 +96,7 @@ isInRefatoryPeriod = false;
 
 maxPeakF = -Inf;
 maxPeakI = -Inf;
+
 
 
 %% empieza a analizar la señal en tiempo real
@@ -140,44 +129,46 @@ for i = beginning:L-2
     % Hace los plots (observamos que el cuello de botella está en la 
     % graficación no en el procesamiento de los datos )
     
-    plt1 = subplot(3,1,1);
+    plt1 = subplot(4,1,1);
     plot(t(1:i-2), localSignal(1:i-2));
     title('Señal ECG Original');
     xlabel('Tiempo (s)');
     ylabel('Voltaje(mV)');
 
-    plt2 = subplot(3,1,2);
+    plt2 = subplot(4,1,2);
     plot(t(1:i-2), localFilteredSignal(1:i-2));
     title('Señal ECG filtrada');
     xlabel('Tiempo (s)');
     ylabel('Voltaje(mV)');
 
-    plt3 = subplot(3,1,3);
+    plt3 = subplot(4,1,3);
     plot(t(1:i-2), integral(1:i-2));
     title('Integral de la derivada al cuadrado de la señal ECG filtrada');
     xlabel('Tiempo (s)');
     ylabel('Unidades arbitrarias (u.a.)');
 
+    plt4 = subplot(4,1,4);
+    hold on
+    plot(1:length(RR1), fliplr(RR1).*(Fs.^-1).*(1000), 'b--o');
+    hold off
+    legend('Duración estimada RR1', 'Location', 'bestoutside')
+    title('Longitud RR1');
+    xlabel('número de QRS detectados');
+    ylabel('ancho de la ventana RR');
+    
     
     if i ~= L-2
         pause(0.0000000000000001);
         cla(plt1);
         cla(plt2); 
         cla(plt3); 
+        cla(plt4);
     end
     
 
     % Al pasar dos segundos hacemos la inicialización
     if i == twoSeconds
  
-        % inicializamos el SPKF
-        peaksFiltered = findpeaks( localFilteredSignal(1:i) );
-        [SPKF, idx] = max(peaksFiltered);
-        SPKF = SPKF/3;
-        
-        % inicializamos el NPKF
-        NPKF = mean(peaksFiltered( 1:length(peaksFiltered) ~= idx ))/2;
-        
         % inicializamos el SPKI
         peaksFiltered = findpeaks(  integral(1:i) );
         [SPKI, idx] = max(peaksFiltered);
@@ -185,6 +176,14 @@ for i = beginning:L-2
         
         % inicializamos el NPKI
         NPKI = mean(peaksFiltered( 1:length(peaksFiltered) ~= idx ))/2;
+        
+        % inicializamos el SPKF
+        peaksFiltered = findpeaks( localFilteredSignal(1:i) );
+        [SPKF, idx] = max(peaksFiltered);
+        SPKF = SPKF/3;
+        
+        % inicializamos el NPKF
+        NPKF = mean(peaksFiltered( 1:length(peaksFiltered) ~= idx ))/2;
                
         % Inicializamos el conjunto de umbrales para la señal filtrada 
         thresholdSetF(1) = NPKF + 0.25*(SPKF - NPKF);
@@ -194,8 +193,44 @@ for i = beginning:L-2
         thresholdSetI(1) = NPKI + 0.25*(SPKI - NPKI);
         thresholdSetI(2) = thresholdSetI(1) * 0.5;
         
-        prevQRSindex = idx;
-        sound(beep, beepFs);
+        % Inicialización del vector de intervalos RR1
+        % obseve que aquí se hace con base a la señal filtrada
+        
+        [peaks, peaksIdxs] = findpeaks(localFilteredSignal(1:i));
+        [maxval, ~] = max(peaks); 
+
+        % tras tener el máximo de la señal busca cuales 
+        % son los picos que tienen 80% o más altura 
+        % que ese pico máximo encontrado, de esta forma se busca detectar
+        % los picos que pueden haber en ese intervalo inicial 
+
+        idxs = find( peaks >= (5/10).*maxval); 
+        
+        % captura los indices en 'localFilteredSignal' de los picos más
+        % altos
+        idxs = peaksIdxs(idxs);
+        
+        if length(idxs) >= 2
+            
+            localPrevIdx = idxs(1);
+            
+            for i = 2:length(idxs)
+                
+                RR = idxs(i) - localPrevIdx;
+                RR1 = [ RR RR1];
+                localPrevIdx = i;
+            end
+            
+        end
+        
+        prevQRSindex = idxs(end);
+        
+        %inicializa RRavg2
+        RRavg2 = mean(RR1);
+        
+        RRlow = RRavg2 * 0.92;
+        RRhigh = RRavg2 * 1.16;
+        RRmiss = RRavg2 * 1.66;
     
     % si llevamos más de los 2 segundos y ya inicializamos entonces 
     % hacemos el proceso de detección de QRS y actualización de variables
@@ -212,17 +247,11 @@ for i = beginning:L-2
         
         if localFilteredSignal(i-2) > thresholdSetF(1)
         
-            isQRSFilt = true;
-            % añade el nuevo intervalo RR a la lista RR1
-            RR1 = [(i - prevQRSindex); RR1];
-            
-            % añade el nuevo intervalo RR a la lista RR2
-            if (RR1(1) >= RRlow ) && (RR1(1) <= RRhigh )
-                RR2 = [RR1(1); RR2];
-            end
-            
-            prevQRSindex = i-2;
+            isQRSFilt = true;  
             SPKF = (0.125 * localFilteredSignal(i-2)) + 0.875 * SPKF;
+            
+            % resetea el pico máximo de la señal filtrada
+            maxPeakF = -Inf;
                         
         % caso en que tiene que usar el 2do umbral para verificar 
         % si la señal pico es un QRS
@@ -234,18 +263,9 @@ for i = beginning:L-2
             
             if maxPeakF > thresholdSetF(2)
                 
-                isQRSFilt = true;
-                %añade el nuevo intervalo RR a la lista 
-                RR1 = [(i - prevQRSindex); RR1];
-                
-                %añade el nuevo intervalo RR a la lista RR2
-                if (RR1(1) >= RRlow ) && (RR1(1) <= RRhigh )
-                    RR2 = [RR1(1); RR2];
-                end
-
-                prevQRSindex = i-2; 
+                isQRSFilt = true;                
                 SPKF = (0.25 * maxPeakF) + 0.75 * SPKF;
-            
+                
             % el caso en el que el pico más grande encontrado a lo largo de este
             % periodo de búsqueda, no sea más grande que el segundo umbral
             % se acutualiza el umbral de ruido
@@ -278,20 +298,19 @@ for i = beginning:L-2
         
         if integral(i-2) > thresholdSetI(1)
         
-            isQRSInt = true;
-            prevQRSindex = i-2;
-            
+            isQRSInt = true;            
             SPKI = (0.125 * integral(i-2)) + 0.875 * SPKI;
             
+            % resetea el pico máximo de la señal integrada
+            maxPeakI = -Inf;     
             
         % caso en que tiene que usar el 2do umbral para verificar 
         % si la señal pico es un QRS
         elseif (RRmiss == (i - 2 - prevQRSindex) )
             
             if maxPeakI > thresholdSetI(2)
-                isQRSInt = true;
-                prevQRSindex = i-2;
                 
+                isQRSInt = true;               
                 SPKI = (0.25 * maxPeakI) + 0.75 * SPKI;
             
             else
@@ -329,29 +348,43 @@ for i = beginning:L-2
              
         if (isQRSFilt && isQRSInt) && ( ~isInRefatoryPeriod )
             
-           sound(beep, beepFs); 
-           isInRefatoryPeriod = true;
+            sound(beep, beepFs); 
+            isInRefatoryPeriod = true;            
+           
+            % calcula la longitud del intervalo RR actual
+            RR = (i - prevQRSindex);
+            
+            % resetea el contador
+            prevQRSindex = i;
+            
+            % añade el RR actual a la lista
+            RR1 = [RR RR1];
+                       
+            % saca la media de los 8 RR1 más recientes
+            if length(RR1) >= 8
+                RRavg1 = mean(RR1(1:8));
+            else
+                RRavg1 = mean(RR1( 1:length(RR1) ));
+            end
 
-        end
-        
-        % saca la media de los 8 RR1 más recientes
-        if length(RR1) >= 8
-            RRavg1 = mean(RR1(1:8));
-        else
-            RRavg1 = mean(RR1( 1:length(RR1) ));
-        end
-        
-        % saca la media de los 8 RR2 más recientes
-        if length(RR2) >= 8
-            RRavg2 = mean(RR2(1:8));
-        else
-            RRavg2 = mean(RR2( 1:length(RR2) ));
+            % saca la media de los 8 RR1 máximos más recientes
+            if length(RR1) >= 8
+                
+                sortedRR1 = sort(RR1, 'descend');
+                RRavg2 = mean(sortedRR1(1:8));
+            else
+                RRavg2 = mean(RR1( 1:length(RR1) ));
+            end
+           
+
+            % indice de intervalo RR bajo, alto y miss 
+            RRlow = RRavg2 * 0.92;
+            RRhigh = RRavg2 * 1.16;
+            RRmiss = RRavg2 * 1.66;
+          
+    
         end
 
-        % indice de intervalo RR bajo, alto y miss 
-        RRlow = RRavg2 * 0.92;
-        RRhigh = RRavg2 * 1.16;
-        RRmiss = RRavg2 * 1.66;
         
     end
     
